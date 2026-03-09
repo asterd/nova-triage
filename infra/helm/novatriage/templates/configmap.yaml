@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+data:
+  AWS_REGION: {{ .Values.env.AWS_REGION | quote }}
+  BEDROCK_NOVA_LITE_MODEL: {{ .Values.env.BEDROCK_NOVA_LITE_MODEL | quote }}
+  BEDROCK_NOVA_PRO_MODEL: {{ .Values.env.BEDROCK_NOVA_PRO_MODEL | quote }}
+  BEDROCK_NOVA_SONIC_MODEL: {{ .Values.env.BEDROCK_NOVA_SONIC_MODEL | quote }}
+  APP_LANGUAGE_DEFAULT: {{ .Values.env.APP_LANGUAGE_DEFAULT | quote }}
+  APP_PROTOCOL_DEFAULT: {{ .Values.env.APP_PROTOCOL_DEFAULT | quote }}

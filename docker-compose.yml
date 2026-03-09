@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  triage-api:
+    build:
+      context: .
+      dockerfile: apps/triage-api/Dockerfile
+      target: dev
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - APP_BASE_URL=http://localhost:3000
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - /app/node_modules
+    command: npm run dev -w triage-api
+
+  frontend-pwa:
+    build:
+      context: .
+      dockerfile: apps/frontend-pwa/Dockerfile
+      target: dev
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - /app/node_modules
+    command: npm run dev -w frontend-pwa
