@@ -39,7 +39,7 @@ Users can:
 
 This is not a diagnosis engine. NovaTriage is built to help a clinician or caregiver understand the case faster and hand it off more safely.
 
-## Built for the Amazon Nova Hackathon
+## Built for the Amazon Nova Hackathon (But extensible as a product)
 
 NovaTriage is intentionally structured around Amazon Nova model specialization rather than a single generic prompt.
 
@@ -59,18 +59,21 @@ Implemented model usage in this repo:
 - `Amazon Nova voice-capable endpoint via Bedrock Converse`
   - voice transcription in the intake flow
   - configurable through `BEDROCK_NOVA_SONIC_MODEL`
-  - current default in code maps to `us.amazon.nova-micro-v1:0`
+  - current default in code maps to `eu.amazon.nova-micro-v1:0`
 
 This gives the project a clear AWS story:
 
 - `AWS Bedrock` for model inference
 - `Amazon Nova` for multimodal and agentic reasoning
+
+In future steps: other AWS service for privacy, storage, database, authentication.
+
 - `Docker Compose` for local full-stack execution
 - `Helm charts` in [`infra/helm/novatriage`](./infra/helm/novatriage) for cloud deployment scaffolding
 
 ## Why the Agentic Design Matters
 
-The orchestration logic is not a single black-box call. It is a coordinated pipeline of specialist stages inspired by the multi-agent approach described in [`eval/MULTI.md`](./eval/MULTI.md), then adapted to what is actually implemented in the codebase today.
+The orchestration logic is not a single black-box call. It is a coordinated pipeline of specialist stages.
 
 Current coordinated stages:
 
@@ -119,10 +122,10 @@ Implemented today:
 Important nuance:
 
 - client-side privacy is implemented and operational
-- a full AWS-side privacy zone with `S3/Textract/redaction-before-Bedrock` is **not** currently part of the implemented runtime
+- a full AWS-side privacy zone with `S3/Textract/redaction-before-Bedrock` is **not** currently part of the implemented runtime 
 - durable anonymized case storage in `DynamoDB` is **not** currently implemented in the backend
 
-That distinction matters for accuracy. The current demo is strong on edge privacy and Bedrock usage; an AWS privacy zone would be a future extension, not something hidden behind marketing language.
+That distinction matters for accuracy. The current version is strong on edge privacy and Bedrock usage; an AWS privacy zone would be a future extension.
 
 ## High-Level Architecture
 
@@ -295,9 +298,7 @@ npm run build -w frontend-pwa
 docker compose config
 ```
 
-## Demo Narrative for Judges
-
-The strongest contest framing is:
+## What we have
 
 - privacy happens first, on device
 - Amazon Nova models are used in specialized roles, not as one generic answer engine
