@@ -92,7 +92,10 @@ export const caseRoutes: FastifyPluginAsync = async (server: FastifyInstance) =>
             return { transcript: transcript.trim() };
         } catch (e: any) {
             server.log.error(e);
-            return reply.code(500).send({ status: 'error', error: e.message });
+            const message = /ENOTFOUND|bedrock-runtime|dns|network/i.test(e.message || '')
+                ? 'Bedrock voice transcription endpoint is unreachable. Check AWS region, DNS resolution, and outbound network access.'
+                : e.message;
+            return reply.code(500).send({ status: 'error', error: message });
         }
     });
 

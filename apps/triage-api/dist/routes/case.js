@@ -79,7 +79,10 @@ const caseRoutes = async (server) => {
         }
         catch (e) {
             server.log.error(e);
-            return reply.code(500).send({ status: 'error', error: e.message });
+            const message = /ENOTFOUND|bedrock-runtime|dns|network/i.test(e.message || '')
+                ? 'Bedrock voice transcription endpoint is unreachable. Check AWS region, DNS resolution, and outbound network access.'
+                : e.message;
+            return reply.code(500).send({ status: 'error', error: message });
         }
     });
     server.post('/analyze', async (request, reply) => {
