@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   triage-api:
     build:
@@ -13,6 +11,12 @@ services:
       - APP_BASE_URL=http://localhost:3000
     env_file:
       - .env
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     volumes:
       - .:/app
       - /app/node_modules
@@ -29,7 +33,16 @@ services:
       - NEXT_PUBLIC_API_URL=http://localhost:8080
     env_file:
       - .env
+    depends_on:
+      triage-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     volumes:
       - .:/app
       - /app/node_modules
-    command: npm run dev -w frontend-pwa
+    command: sh -lc "npm install --include=optional --no-audit --no-fund && npm run predev -w frontend-pwa && npm run dev -w frontend-pwa"

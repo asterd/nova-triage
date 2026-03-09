@@ -30,13 +30,13 @@ export const invokeNovaSonic = async (system: string, audioBase64: string) => {
 };
 
 export const invokeNovaMultimodal = async (modelId: string, system: string, text: string, attachments: { name: string, type: string, base64: string }[]) => {
-
-    // Convert generic attachments to Converse blocks
+    const inlineTextAttachments: string[] = [];
     const contentBlocks: any[] = [{ text }];
 
     for (const att of attachments) {
         const buffer = Buffer.from(att.base64, 'base64');
         const ext = att.name.split('.').pop()?.toLowerCase();
+        const normalizedType = (att.type || '').toLowerCase();
 
         if (att.type.startsWith('image/') || ['png', 'jpeg', 'webp', 'gif'].includes(ext || '')) {
             contentBlocks.push({
@@ -45,7 +45,7 @@ export const invokeNovaMultimodal = async (modelId: string, system: string, text
                     source: { bytes: buffer }
                 }
             });
-        } else if (att.type === 'application/pdf' || ext === 'pdf') {
+        } else if (normalizedType === 'application/pdf' || ext === 'pdf') {
             contentBlocks.push({
                 document: {
                     name: att.name.replace(/[^a-zA-Z0-9]/g, '').substring(0, 10),
@@ -53,7 +53,17 @@ export const invokeNovaMultimodal = async (modelId: string, system: string, text
                     source: { bytes: buffer }
                 }
             });
+        } else if (normalizedType.startsWith('text/') || normalizedType === 'application/json' || normalizedType === 'application/xml') {
+            inlineTextAttachments.push(buffer.toString('utf8'));
         }
+    }
+
+    if (inlineTextAttachments.length > 0) {
+        contentBlocks[0] = {
+            text: `${text}\n\nRedacted text attachments:\n${inlineTextAttachments
+                .map((item, index) => `Attachment ${index + 1}:\n${item}`)
+                .join('\n\n')}`
+        };
     }
 
     const message: Message = {
@@ -90,6 +100,6 @@ const invokeNovaConverse = async (modelId: string, system: string, messages: Mes
         return "{}";
     } catch (e: any) {
         console.error("ConverseCommand Error:", e);
-        throw new Error(`Bedrock Converse API failed: \${e.message}`);
+        throw new Error(`Bedrock Converse API failed: ${e.message}`);
     }
 };

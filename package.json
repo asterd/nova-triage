@@ -3,15 +3,22 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "turbo run build",
+    "build": "npm run build -w shared-types && npm run build -w prompts && npm run build -w triage-api && npm run build -w frontend-pwa",
     "dev": "turbo run dev",
     "lint": "turbo run lint",
-    "test": "turbo run test"
+    "test": "npm run test -w triage-api && npm run test -w frontend-pwa"
   },
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
+  "optionalDependencies": {
+    "lightningcss-darwin-arm64": "1.31.1",
+    "lightningcss-linux-arm64-musl": "1.31.1",
+    "lightningcss-linux-x64-musl": "1.31.1",
+    "lightningcss-linux-arm64-gnu": "1.31.1",
+    "lightningcss-linux-x64-gnu": "1.31.1"
+  },
   "devDependencies": {
     "turbo": "^1.12.4",
     "typescript": "^5.3.3"

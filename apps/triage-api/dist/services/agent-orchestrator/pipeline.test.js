@@ -40,6 +40,7 @@ const bedrock = __importStar(require("../nova-clients/bedrock"));
 vitest_1.vi.mock('../nova-clients/bedrock', () => ({
     invokeNovaLite: vitest_1.vi.fn(),
     invokeNovaPro: vitest_1.vi.fn(),
+    invokeNovaMultimodal: vitest_1.vi.fn(),
 }));
 (0, vitest_1.describe)('Agent Orchestrator Pipeline', () => {
     (0, vitest_1.it)('should process input and return an AI result matching the schema', async () => {
@@ -87,11 +88,16 @@ vitest_1.vi.mock('../nova-clients/bedrock', () => ({
             .mockResolvedValueOnce(JSON.stringify({
             handoff_card_markdown: '# FastTrack Handoff\n\n- Patient: Unknown\n- Chief Complaint: Chest Pain\n- Urgency: CRITICAL'
         })); // 6. handoff composer
-        const result = await (0, pipeline_1.runOrchestrationPipeline)('my chest hurts really bad', 'generic');
+        const result = await (0, pipeline_1.runOrchestrationPipeline)('my chest hurts really bad', 'generic', {}, 8, 'sudden');
         (0, vitest_1.expect)(result).toBeDefined();
         (0, vitest_1.expect)(result.urgency_level).toBe('critical');
+        (0, vitest_1.expect)(result.protocol_code).toBe('generic');
+        (0, vitest_1.expect)(result.suggested_destination_code).toBe('ambulance');
         (0, vitest_1.expect)(result.patient_summary).toContain('immediate');
         (0, vitest_1.expect)(result.handoff_card_markdown).toContain('FastTrack');
+        (0, vitest_1.expect)(result.rules_triggered).toContain('severe_chest_pain_sudden_onset');
+        (0, vitest_1.expect)(result.safety_escalation_applied).toBe(false);
+        (0, vitest_1.expect)(result.audit_trail.length).toBeGreaterThan(0);
         // Verify it called Bedrock functions
         (0, vitest_1.expect)(bedrock.invokeNovaLite).toHaveBeenCalledTimes(4);
         (0, vitest_1.expect)(bedrock.invokeNovaPro).toHaveBeenCalledTimes(2);

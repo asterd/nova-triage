@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { caseRoutes } from './routes/case';
 import { protocolRoutes } from './routes/protocols';
+import { getCaseStats } from './services/case-store';
 
 const server = Fastify({ logger: true });
 
@@ -10,7 +11,19 @@ server.register(cors, {
 });
 
 server.get('/api/health', async () => {
-    return { status: 'ok' };
+    return {
+        status: 'ok',
+        service: 'triage-api',
+        timestamp: new Date().toISOString(),
+        bedrock_region: process.env.AWS_REGION || 'us-east-1',
+        bedrock_models: {
+            lite: process.env.BEDROCK_NOVA_LITE_MODEL || 'us.amazon.nova-lite-v1:0',
+            pro: process.env.BEDROCK_NOVA_PRO_MODEL || 'us.amazon.nova-pro-v1:0',
+            sonic: process.env.BEDROCK_NOVA_SONIC_MODEL || 'us.amazon.nova-micro-v1:0'
+        },
+        bedrock_configured: Boolean(process.env.AWS_ACCESS_KEY_ID || process.env.AWS_PROFILE || process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI),
+        case_store: getCaseStats()
+    };
 });
 
 server.register(caseRoutes, { prefix: '/api/case' });

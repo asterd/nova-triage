@@ -5,9 +5,9 @@ const protocolRoutes = async (server) => {
     server.get('/', async (request, reply) => {
         return {
             protocols: [
-                { id: 'generic', label: 'Generic Flow' },
-                { id: 'italy', label: 'Italian Protocol' },
-                { id: 'home', label: 'Home Care' }
+                { id: 'generic', label: 'Generic standard (5-level)' },
+                { id: 'italy', label: 'Italian standard' },
+                { id: 'home', label: 'Home care guide' }
             ]
         };
     });
