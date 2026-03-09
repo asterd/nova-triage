@@ -20,7 +20,7 @@ services:
     volumes:
       - .:/app
       - /app/node_modules
-    command: npm run dev -w triage-api
+    command: sh -lc "npm install --no-audit --no-fund && npm run dev -w triage-api"
 
   frontend-pwa:
     build:

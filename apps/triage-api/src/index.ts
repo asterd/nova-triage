@@ -19,8 +19,9 @@ server.get('/api/health', async () => {
         bedrock_models: {
             lite: process.env.BEDROCK_NOVA_LITE_MODEL || 'us.amazon.nova-lite-v1:0',
             pro: process.env.BEDROCK_NOVA_PRO_MODEL || 'us.amazon.nova-pro-v1:0',
-            sonic: process.env.BEDROCK_NOVA_SONIC_MODEL || 'us.amazon.nova-micro-v1:0'
+            sonic: process.env.BEDROCK_NOVA_SONIC_MODEL || 'amazon.nova-sonic-v1:0'
         },
+        bedrock_voice_region: process.env.BEDROCK_NOVA_SONIC_REGION || 'us-east-1',
         bedrock_configured: Boolean(process.env.AWS_ACCESS_KEY_ID || process.env.AWS_PROFILE || process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI),
         case_store: getCaseStats()
     };

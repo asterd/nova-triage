@@ -56,10 +56,10 @@ Implemented model usage in this repo:
   - clinician handoff composition
   - report analysis
   - medication guidance
-- `Amazon Nova voice-capable endpoint via Bedrock Converse`
+- `Amazon Nova Sonic via Bedrock bidirectional streaming`
   - voice transcription in the intake flow
   - configurable through `BEDROCK_NOVA_SONIC_MODEL`
-  - current default in code maps to `eu.amazon.nova-micro-v1:0`
+  - current default in code maps to `amazon.nova-sonic-v1:0`
 
 This gives the project a clear AWS story:
 
