@@ -1,0 +1,78 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const vitest_1 = require("vitest");
+const bedrock_1 = require("./bedrock");
+const encodeEvent = (event) => ({
+    chunk: {
+        bytes: Buffer.from(JSON.stringify({ event }), 'utf8')
+    }
+});
+(0, vitest_1.describe)('extractNovaSonicTranscript', () => {
+    (0, vitest_1.it)('collects final user ASR transcript linked by contentId', () => {
+        const transcript = (0, bedrock_1.extractNovaSonicTranscript)([
+            encodeEvent({
+                contentStart: {
+                    promptName: 'transcribe_audio',
+                    contentId: 'user-text-1',
+                    type: 'TEXT',
+                    role: 'USER',
+                    interactive: false,
+                    additionalModelFields: JSON.stringify({ generationStage: 'FINAL' })
+                }
+            }),
+            encodeEvent({
+                textOutput: {
+                    contentId: 'user-text-1',
+                    content: 'Patient reports '
+                }
+            }),
+            encodeEvent({
+                textOutput: {
+                    contentId: 'user-text-1',
+                    content: 'chest pain for ten minutes.'
+                }
+            }),
+            encodeEvent({
+                contentEnd: {
+                    contentId: 'user-text-1'
+                }
+            })
+        ]);
+        (0, vitest_1.expect)(transcript).toBe('Patient reports chest pain for ten minutes.');
+    });
+    (0, vitest_1.it)('ignores speculative assistant text and keeps final assistant or user text only', () => {
+        const transcript = (0, bedrock_1.extractNovaSonicTranscript)([
+            encodeEvent({
+                contentStart: {
+                    contentId: 'assistant-speculative-1',
+                    type: 'TEXT',
+                    role: 'ASSISTANT',
+                    interactive: false,
+                    additionalModelFields: JSON.stringify({ generationStage: 'SPECULATIVE' })
+                }
+            }),
+            encodeEvent({
+                textOutput: {
+                    contentId: 'assistant-speculative-1',
+                    content: 'Preview text that should be ignored.'
+                }
+            }),
+            encodeEvent({
+                contentStart: {
+                    contentId: 'assistant-final-1',
+                    type: 'TEXT',
+                    role: 'ASSISTANT',
+                    interactive: false,
+                    additionalModelFields: JSON.stringify({ generationStage: 'FINAL' })
+                }
+            }),
+            encodeEvent({
+                textOutput: {
+                    contentId: 'assistant-final-1',
+                    content: 'Include this.'
+                }
+            })
+        ]);
+        (0, vitest_1.expect)(transcript).toBe('Include this.');
+    });
+});

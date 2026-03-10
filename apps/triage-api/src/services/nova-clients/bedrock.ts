@@ -1,5 +1,6 @@
 import { BedrockRuntimeClient, ConverseCommand, InvokeModelWithBidirectionalStreamCommand, Message } from '@aws-sdk/client-bedrock-runtime';
 import { NodeHttp2Handler } from '@smithy/node-http-handler';
+import { randomUUID } from 'node:crypto';
 
 const clientCache = new Map<string, BedrockRuntimeClient>();
 
@@ -31,10 +32,53 @@ export const invokeNovaPro = async (system: string, prompt: string) => {
 };
 
 const DEFAULT_SONIC_MODEL = 'amazon.nova-sonic-v1:0';
+const SONIC_FRAME_DURATION_MS = 32;   // ms per audio chunk — matches real-time mic cadence
+const SONIC_POST_SILENCE_MS = 800;    // trailing silence so VAD detects end-of-speech
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 type SonicTranscriptOptions = {
     sampleRateHertz?: number;
     prompt?: string;
+};
+
+type SonicChunkPayload = {
+    event?: {
+        contentStart?: {
+            contentId?: string;
+            contentName?: string;
+            type?: string;
+            role?: string;
+            interactive?: boolean;
+            additionalModelFields?: string;
+        };
+        contentEnd?: {
+            contentId?: string;
+            contentName?: string;
+        };
+        textOutput?: {
+            content?: string;
+            contentId?: string;
+            contentName?: string;
+        };
+    };
+};
+
+type SonicContentMeta = {
+    role?: string;
+    type?: string;
+    interactive?: boolean;
+    generationStage?: string;
+};
+
+type SonicEventSummary = {
+    eventNames: string[];
+    textOutputs: Array<{
+        contentKey?: string;
+        role?: string;
+        generationStage?: string;
+        preview: string;
+    }>;
 };
 
 const encodeSonicEvent = (event: Record<string, unknown>) => ({
@@ -43,7 +87,11 @@ const encodeSonicEvent = (event: Record<string, unknown>) => ({
     }
 });
 
-async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: string, sampleRateHertz: number, prompt: string) {
+async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: string, sampleRateHertz: number) {
+    const promptName = randomUUID();
+    const systemInstructionContentName = randomUUID();
+    const patientAudioContentName = randomUUID();
+
     yield encodeSonicEvent({
         event: {
             sessionStart: {
@@ -51,6 +99,12 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
                     maxTokens: 1024,
                     topP: 0.9,
                     temperature: 0
+                },
+                turnDetectionConfiguration: {
+                    voiceActivityDetectionConfiguration: {
+                        startTimeout: 0,
+                        endTimeout: 200
+                    }
                 }
             }
         }
@@ -59,7 +113,7 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
     yield encodeSonicEvent({
         event: {
             promptStart: {
-                promptName: 'transcribe_audio',
+                promptName,
                 textOutputConfiguration: { mediaType: 'text/plain' },
                 audioOutputConfiguration: {
                     mediaType: 'audio/lpcm',
@@ -77,12 +131,12 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
     yield encodeSonicEvent({
         event: {
             contentStart: {
-                promptName: 'transcribe_audio',
-                contentName: 'system_instruction',
+                promptName,
+                contentName: systemInstructionContentName,
                 type: 'TEXT',
                 role: 'SYSTEM',
                 interactive: false,
-                textInputConfiguration: {}
+                textInputConfiguration: { mediaType: 'text/plain' }
             }
         }
     });
@@ -90,8 +144,8 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
     yield encodeSonicEvent({
         event: {
             textInput: {
-                promptName: 'transcribe_audio',
-                contentName: 'system_instruction',
+                promptName,
+                contentName: systemInstructionContentName,
                 content: systemPrompt
             }
         }
@@ -100,8 +154,8 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
     yield encodeSonicEvent({
         event: {
             contentEnd: {
-                promptName: 'transcribe_audio',
-                contentName: 'system_instruction'
+                promptName,
+                contentName: systemInstructionContentName
             }
         }
     });
@@ -109,73 +163,61 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
     yield encodeSonicEvent({
         event: {
             contentStart: {
-                promptName: 'transcribe_audio',
-                contentName: 'user_request',
-                type: 'TEXT',
-                role: 'USER',
-                interactive: false,
-                textInputConfiguration: {}
-            }
-        }
-    });
-
-    yield encodeSonicEvent({
-        event: {
-            textInput: {
-                promptName: 'transcribe_audio',
-                contentName: 'user_request',
-                content: prompt
-            }
-        }
-    });
-
-    yield encodeSonicEvent({
-        event: {
-            contentEnd: {
-                promptName: 'transcribe_audio',
-                contentName: 'user_request'
-            }
-        }
-    });
-
-    yield encodeSonicEvent({
-        event: {
-            contentStart: {
-                promptName: 'transcribe_audio',
-                contentName: 'patient_audio',
+                promptName,
+                contentName: patientAudioContentName,
                 type: 'AUDIO',
                 role: 'USER',
-                interactive: false,
+                interactive: true,
                 audioInputConfiguration: {
                     mediaType: 'audio/lpcm',
                     sampleRateHertz,
                     sampleSizeBits: 16,
                     channelCount: 1,
-                    audioType: 'SPEECH'
+                    audioType: 'SPEECH',
+                    encoding: 'base64'
                 }
             }
         }
     });
 
-    const chunkSize = sampleRateHertz * 2;
+    const bytesPerSample = 2;
+    const frameSamples = Math.max(1, Math.round((sampleRateHertz * SONIC_FRAME_DURATION_MS) / 1000));
+    const chunkSize = frameSamples * bytesPerSample;
     for (let offset = 0; offset < audioBytes.length; offset += chunkSize) {
         const frame = audioBytes.slice(offset, Math.min(audioBytes.length, offset + chunkSize));
         yield encodeSonicEvent({
             event: {
                 audioInput: {
-                    promptName: 'transcribe_audio',
-                    contentName: 'patient_audio',
+                    promptName,
+                    contentName: patientAudioContentName,
                     content: Buffer.from(frame).toString('base64')
                 }
             }
         });
+        await sleep(SONIC_FRAME_DURATION_MS);
+    }
+
+    // Trailing silence: give VAD time to detect end-of-speech before we close the stream
+    const silenceFrames = Math.ceil(SONIC_POST_SILENCE_MS / SONIC_FRAME_DURATION_MS);
+    const silenceChunk = Buffer.alloc(chunkSize).toString('base64');
+    for (let i = 0; i < silenceFrames; i++) {
+        yield encodeSonicEvent({
+            event: {
+                audioInput: {
+                    promptName,
+                    contentName: patientAudioContentName,
+                    content: silenceChunk
+                }
+            }
+        });
+        await sleep(SONIC_FRAME_DURATION_MS);
     }
 
     yield encodeSonicEvent({
         event: {
             contentEnd: {
-                promptName: 'transcribe_audio',
-                contentName: 'patient_audio'
+                promptName,
+                contentName: patientAudioContentName
             }
         }
     });
@@ -183,7 +225,7 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
     yield encodeSonicEvent({
         event: {
             promptEnd: {
-                promptName: 'transcribe_audio'
+                promptName
             }
         }
     });
@@ -194,6 +236,131 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
         }
     });
 }
+
+const parseSonicAdditionalModelFields = (raw?: string) => {
+    if (!raw) {
+        return {};
+    }
+
+    try {
+        return JSON.parse(raw) as { generationStage?: string };
+    } catch {
+        return {};
+    }
+};
+
+const summarizeSonicEvent = (streamEvent: { chunk?: { bytes?: Uint8Array } }): SonicEventSummary | null => {
+    if (!streamEvent.chunk?.bytes) {
+        return null;
+    }
+
+    const payloadText = Buffer.from(streamEvent.chunk.bytes).toString('utf8');
+    const payload = JSON.parse(payloadText) as SonicChunkPayload;
+    const event = payload.event;
+    if (!event) {
+        return null;
+    }
+
+    const eventNames = Object.keys(event);
+    const textOutputs: SonicEventSummary['textOutputs'] = [];
+    if (typeof event.textOutput?.content === 'string') {
+        const contentKey = event.textOutput.contentId || event.textOutput.contentName;
+        const additionalModelFields = parseSonicAdditionalModelFields(event.contentStart?.additionalModelFields);
+        textOutputs.push({
+            contentKey,
+            role: event.contentStart?.role,
+            generationStage: additionalModelFields.generationStage,
+            preview: event.textOutput.content.slice(0, 120)
+        });
+    }
+
+    return { eventNames, textOutputs };
+};
+
+const analyzePcm16Audio = (audioBytes: Uint8Array, sampleRateHertz: number) => {
+    const sampleCount = Math.floor(audioBytes.length / 2);
+    let peak = 0;
+    let sumSquares = 0;
+
+    for (let offset = 0; offset + 1 < audioBytes.length; offset += 2) {
+        const sample = Buffer.from(audioBytes.buffer, audioBytes.byteOffset + offset, 2).readInt16LE(0) / 32768;
+        const abs = Math.abs(sample);
+        if (abs > peak) {
+            peak = abs;
+        }
+        sumSquares += sample * sample;
+    }
+
+    const rms = sampleCount > 0 ? Math.sqrt(sumSquares / sampleCount) : 0;
+
+    return {
+        bytes: audioBytes.length,
+        durationMs: Math.round((sampleCount / sampleRateHertz) * 1000),
+        peak: Number(peak.toFixed(4)),
+        rms: Number(rms.toFixed(4))
+    };
+};
+
+export const extractNovaSonicTranscript = (streamEvents: Array<{ chunk?: { bytes?: Uint8Array } }>) => {
+    const transcriptParts: string[] = [];
+    const contentRoles = new Map<string, SonicContentMeta>();
+
+    for (const streamEvent of streamEvents) {
+        if (!streamEvent.chunk?.bytes) {
+            continue;
+        }
+
+        const payloadText = Buffer.from(streamEvent.chunk.bytes).toString('utf8');
+        const payload = JSON.parse(payloadText) as SonicChunkPayload;
+        const event = payload.event;
+        if (!event) {
+            continue;
+        }
+
+        const contentStart = event.contentStart;
+        if (contentStart) {
+            const contentKey = contentStart.contentId || contentStart.contentName;
+            const generationStage = parseSonicAdditionalModelFields(contentStart.additionalModelFields).generationStage;
+            if (contentKey) {
+                contentRoles.set(contentKey, {
+                    role: contentStart.role,
+                    type: contentStart.type,
+                    interactive: contentStart.interactive,
+                    generationStage
+                });
+            }
+        }
+
+        const textOutput = event.textOutput;
+        if (typeof textOutput?.content === 'string') {
+            const contentKey = textOutput.contentId || textOutput.contentName;
+            const contentMeta = contentKey ? contentRoles.get(contentKey) : undefined;
+            const isFinalUserTranscript =
+                contentMeta?.role === 'USER' &&
+                contentMeta?.type === 'TEXT' &&
+                (contentMeta.generationStage === 'FINAL' || !contentMeta.generationStage);
+            const isFinalAssistantTranscript =
+                contentMeta?.role === 'ASSISTANT' &&
+                contentMeta?.type === 'TEXT' &&
+                contentMeta.generationStage === 'FINAL';
+            const isFallbackTranscript = !contentMeta && textOutput.content.trim().length > 0;
+
+            if (isFinalUserTranscript || isFinalAssistantTranscript || isFallbackTranscript) {
+                transcriptParts.push(textOutput.content);
+            }
+        }
+
+        const contentEnd = event.contentEnd;
+        if (contentEnd) {
+            const contentKey = contentEnd.contentId || contentEnd.contentName;
+            if (contentKey) {
+                contentRoles.delete(contentKey);
+            }
+        }
+    }
+
+    return transcriptParts.join('').replace(/\s+/g, ' ').trim();
+};
 
 export const invokeNovaSonic = async (system: string, audioBase64: string, options: SonicTranscriptOptions = {}) => {
     const rawModelId = process.env.BEDROCK_NOVA_SONIC_MODEL || DEFAULT_SONIC_MODEL;
@@ -211,37 +378,36 @@ export const invokeNovaSonic = async (system: string, audioBase64: string, optio
         throw new Error('Audio payload is empty.');
     }
 
+    const combinedSystem = prompt ? `${system}\n\n${prompt}` : system;
+
     const command = new InvokeModelWithBidirectionalStreamCommand({
         modelId,
-        body: buildSonicInputStream(audioBytes, system, sampleRateHertz, prompt),
-    });
+        body: buildSonicInputStream(audioBytes, combinedSystem, sampleRateHertz),
+        contentType: 'application/json',
+        accept: 'application/json'
+    } as any);
     command.middlewareStack.add(
         (next) => async (args) => {
-            const request = args.request as any;
-            if (request) {
-                request.headers = {
-                    ...(request.headers ?? {}),
-                    'content-type': 'application/json',
-                    'accept': 'application/json',
-                };
-            }
-            return next(args);
+            const request = args.request as { headers?: Record<string, string> };
+            request.headers = {
+                ...(request.headers || {}),
+                'content-type': 'application/json',
+                accept: 'application/json',
+                'x-amzn-bedrock-content-type': 'application/json',
+                'x-amzn-bedrock-accept': 'application/json'
+            };
+            return next({ ...args, request });
         },
-        { step: 'build', name: 'novaSonicContentTypeMiddleware', priority: 'high' }
+        { step: 'build', name: 'novaSonicContentTypeMiddleware' }
     );
 
     try {
         const response = await getBedrockClient(sonicRegion).send(command);
-        const transcriptParts: string[] = [];
+        const streamEvents: Array<{ chunk?: { bytes?: Uint8Array } }> = [];
 
         for await (const event of response.body ?? []) {
             if ('chunk' in event && event.chunk?.bytes) {
-                const payloadText = Buffer.from(event.chunk.bytes).toString('utf8');
-                const payload = JSON.parse(payloadText);
-                const textOutput = payload?.event?.textOutput;
-                if (textOutput?.role === 'USER' && typeof textOutput.content === 'string') {
-                    transcriptParts.push(textOutput.content);
-                }
+                streamEvents.push({ chunk: { bytes: event.chunk.bytes } });
                 continue;
             }
 
@@ -265,8 +431,19 @@ export const invokeNovaSonic = async (system: string, audioBase64: string, optio
             }
         }
 
-        const transcript = transcriptParts.join('').replace(/\s+/g, ' ').trim();
+        const transcript = extractNovaSonicTranscript(streamEvents);
         if (!transcript) {
+            const audioStats = analyzePcm16Audio(audioBytes, sampleRateHertz);
+            const eventSummaries = streamEvents
+                .map((event) => summarizeSonicEvent(event))
+                .filter((summary): summary is SonicEventSummary => Boolean(summary));
+            console.error('Nova Sonic empty transcript diagnostics:', {
+                modelId,
+                sonicRegion,
+                audio: audioStats,
+                eventNames: eventSummaries.flatMap((summary) => summary.eventNames),
+                textOutputs: eventSummaries.flatMap((summary) => summary.textOutputs)
+            });
             throw new Error('Nova Sonic returned no transcript.');
         }
         return transcript;
