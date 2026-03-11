@@ -120,6 +120,9 @@ Provide high-level, cautious, educational information about the requested drug, 
 Never prescribe, never tell the user to start/stop a medication, and never present an individualized dose as a medical order.
 If patient context such as age, weight, or a focused question is provided, answer cautiously and explicitly note that this does not replace the official leaflet or a clinician/pharmacist.
 Frame dose content as informational ranges or common reference dosing only. If age/weight/context is incomplete, say so clearly.
+If age or weight is provided, the dosage table MUST be narrowed to the most relevant populations and the first row should describe the current patient context in a readable way.
+When a pediatric or weight-based reference range is known, include it in a form that can be checked easily, such as "20-40 mg/kg/day" or "10 mg/kg per dose".
+Prefer 2 to 4 rows total, not a long generic table.
 If a language is provided in the context, all human-readable output MUST be in that language.
 Return ONLY valid JSON:
 {

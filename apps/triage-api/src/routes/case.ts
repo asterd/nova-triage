@@ -85,7 +85,7 @@ export const caseRoutes: FastifyPluginAsync = async (server: FastifyInstance) =>
     server.post<{ Body: { audio_base64: string; sample_rate_hz?: number; format?: string } }>('/voice', async (request, reply) => {
         try {
             const { audio_base64, sample_rate_hz } = request.body;
-            const transcript = await invokeNovaSonic(
+            const { transcript } = await invokeNovaSonic(
                 "You are an expert clinical transcriber. Transcribe the patient's symptoms exactly as spoken. Ignore background noise. Return only the raw text transcript, no surrounding markdown.",
                 audio_base64,
                 { sampleRateHertz: sample_rate_hz || 16000 }

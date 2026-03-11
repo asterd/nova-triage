@@ -21,7 +21,7 @@ env:
   AWS_REGION: us-east-1
   BEDROCK_NOVA_LITE_MODEL: us.amazon.nova-lite-v1:0
   BEDROCK_NOVA_PRO_MODEL: us.amazon.nova-pro-v1:0
-  BEDROCK_NOVA_SONIC_MODEL: us.amazon.nova-micro-v1:0
+  BEDROCK_NOVA_SONIC_MODEL: amazon.nova-2-sonic-v1:0
   APP_LANGUAGE_DEFAULT: en
   APP_PROTOCOL_DEFAULT: generic
 

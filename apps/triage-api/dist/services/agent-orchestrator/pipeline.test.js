@@ -36,6 +36,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const vitest_1 = require("vitest");
 const pipeline_1 = require("./pipeline");
 const bedrock = __importStar(require("../nova-clients/bedrock"));
+const bedrock_mock_builder_1 = require("../../tests/utils/bedrock-mock-builder");
 // Mock the bedrock clients so we don't need real AWS credentials
 vitest_1.vi.mock('../nova-clients/bedrock', () => ({
     invokeNovaLite: vitest_1.vi.fn(),
@@ -44,50 +45,8 @@ vitest_1.vi.mock('../nova-clients/bedrock', () => ({
 }));
 (0, vitest_1.describe)('Agent Orchestrator Pipeline', () => {
     (0, vitest_1.it)('should process input and return an AI result matching the schema', async () => {
-        // Mock sequential bedrock calls
-        vitest_1.vi.mocked(bedrock.invokeNovaLite)
-            .mockResolvedValueOnce(JSON.stringify({
-            normalized_text: 'patient has chest pain',
-            possible_primary_complaint: 'chest pain',
-            language_guess: 'en'
-        })) // 1. normalizer
-            .mockResolvedValueOnce(JSON.stringify({
-            chief_complaint: 'chest pain',
-            onset: '10 minutes ago',
-            duration: '10 min',
-            pain_score: 8,
-            symptoms: ['chest pain'],
-            associated_symptoms: [],
-            aggravating_factors: [],
-            relieving_factors: [],
-            known_conditions_mentioned: [],
-            medications_mentioned: []
-        })) // 2. structurer
-            .mockResolvedValueOnce(JSON.stringify({
-            urgency_level: 'critical',
-            confidence: 0.95,
-            risk_factors: ['chest pain', 'sudden onset'],
-            reasoning_summary: ['High risk of ACS']
-        })) // 4. risk classifier
-            .mockResolvedValueOnce(JSON.stringify({
-            patient_summary: 'You have severe chest pain and need immediate medical attention.',
-            next_steps: ['Call 911'],
-            emergency_warning: true
-        })); // 7. patient explanation
-        vitest_1.vi.mocked(bedrock.invokeNovaPro)
-            .mockResolvedValueOnce(JSON.stringify({
-            clusters: [
-                {
-                    label: 'Acute Coronary Syndrome',
-                    score: 0.9,
-                    supporting_factors: ['chest pain'],
-                    against_factors: []
-                }
-            ]
-        })) // 5. differential
-            .mockResolvedValueOnce(JSON.stringify({
-            handoff_card_markdown: '# FastTrack Handoff\n\n- Patient: Unknown\n- Chief Complaint: Chest Pain\n- Urgency: CRITICAL'
-        })); // 6. handoff composer
+        // Use externalized mock builder to contextualize the test
+        (0, bedrock_mock_builder_1.setupPipelineBedrockMocks)(bedrock);
         const result = await (0, pipeline_1.runOrchestrationPipeline)('my chest hurts really bad', 'generic', {}, 8, 'sudden');
         (0, vitest_1.expect)(result).toBeDefined();
         (0, vitest_1.expect)(result.urgency_level).toBe('critical');

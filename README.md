@@ -59,7 +59,7 @@ Implemented model usage in this repo:
 - `Amazon Nova Sonic via Bedrock bidirectional streaming`
   - voice transcription in the intake flow
   - configurable through `BEDROCK_NOVA_SONIC_MODEL`
-  - current default in code maps to `amazon.nova-sonic-v1:0`
+  - automatic default prefers `amazon.nova-2-sonic-v1:0` and falls back to `amazon.nova-sonic-v1:0`
 
 This gives the project a clear AWS story:
 
@@ -259,6 +259,7 @@ Optional model overrides:
 - `BEDROCK_NOVA_LITE_MODEL`
 - `BEDROCK_NOVA_PRO_MODEL`
 - `BEDROCK_NOVA_SONIC_MODEL`
+  - if omitted, the API auto-tries `amazon.nova-2-sonic-v1:0` then `amazon.nova-sonic-v1:0`
 
 ### Install
 

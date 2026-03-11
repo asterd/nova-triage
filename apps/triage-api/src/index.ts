@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { caseRoutes } from './routes/case';
 import { protocolRoutes } from './routes/protocols';
+import { voiceAssistantRoutes } from './routes/voice-assistant';
 import { getCaseStats } from './services/case-store';
 
 const server = Fastify({ logger: true });
@@ -19,7 +20,7 @@ server.get('/api/health', async () => {
         bedrock_models: {
             lite: process.env.BEDROCK_NOVA_LITE_MODEL || 'us.amazon.nova-lite-v1:0',
             pro: process.env.BEDROCK_NOVA_PRO_MODEL || 'us.amazon.nova-pro-v1:0',
-            sonic: process.env.BEDROCK_NOVA_SONIC_MODEL || 'amazon.nova-sonic-v1:0'
+            sonic: process.env.BEDROCK_NOVA_SONIC_MODEL || 'auto: amazon.nova-2-sonic-v1:0 -> amazon.nova-sonic-v1:0'
         },
         bedrock_voice_region: process.env.BEDROCK_NOVA_SONIC_REGION || 'us-east-1',
         bedrock_configured: Boolean(process.env.AWS_ACCESS_KEY_ID || process.env.AWS_PROFILE || process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI),
@@ -28,6 +29,7 @@ server.get('/api/health', async () => {
 });
 
 server.register(caseRoutes, { prefix: '/api/case' });
+server.register(voiceAssistantRoutes, { prefix: '/api/case/voice-assistant' });
 server.register(protocolRoutes, { prefix: '/api/protocols' });
 
 const start = async () => {

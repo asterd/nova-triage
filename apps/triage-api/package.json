@@ -9,8 +9,9 @@
         "test": "vitest run src"
     },
     "dependencies": {
-        "@aws-sdk/client-bedrock-runtime": "^3.787.0",
+        "@aws-sdk/client-bedrock-runtime": "^3.1006.0",
         "@fastify/cors": "^9.0.1",
+        "@smithy/node-http-handler": "^4.4.14",
         "fastify": "^4.26.1",
         "shared-types": "*",
         "uuid": "^9.0.1",

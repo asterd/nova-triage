@@ -74,7 +74,7 @@ const caseRoutes = async (server) => {
     server.post('/voice', async (request, reply) => {
         try {
             const { audio_base64, sample_rate_hz } = request.body;
-            const transcript = await (0, bedrock_1.invokeNovaSonic)("You are an expert clinical transcriber. Transcribe the patient's symptoms exactly as spoken. Ignore background noise. Return only the raw text transcript, no surrounding markdown.", audio_base64, { sampleRateHertz: sample_rate_hz || 16000 });
+            const { transcript } = await (0, bedrock_1.invokeNovaSonic)("You are an expert clinical transcriber. Transcribe the patient's symptoms exactly as spoken. Ignore background noise. Return only the raw text transcript, no surrounding markdown.", audio_base64, { sampleRateHertz: sample_rate_hz || 16000 });
             return { transcript: transcript.trim() };
         }
         catch (e) {

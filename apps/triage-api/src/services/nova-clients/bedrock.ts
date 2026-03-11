@@ -2,6 +2,10 @@ import { BedrockRuntimeClient, ConverseCommand, InvokeModelWithBidirectionalStre
 import { NodeHttp2Handler } from '@smithy/node-http-handler';
 import { randomUUID } from 'node:crypto';
 
+if (process.env.BEDROCK_ALLOW_INSECURE_TLS === 'true') {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
+
 const clientCache = new Map<string, BedrockRuntimeClient>();
 
 const getBedrockClient = (region: string) => {
@@ -31,9 +35,13 @@ export const invokeNovaPro = async (system: string, prompt: string) => {
     return invokeNovaText(modelId, system, prompt);
 };
 
-const DEFAULT_SONIC_MODEL = 'amazon.nova-sonic-v1:0';
+const DEFAULT_SONIC_MODEL = 'amazon.nova-2-sonic-v1:0';
+const LEGACY_SONIC_MODEL = 'amazon.nova-sonic-v1:0';
 const SONIC_FRAME_DURATION_MS = 32;   // ms per audio chunk — matches real-time mic cadence
 const SONIC_POST_SILENCE_MS = 800;    // trailing silence so VAD detects end-of-speech
+const SONIC_TEXT_MIME = 'text/plain';
+const SONIC_AUDIO_MIME = 'audio/lpcm';
+const SONIC_MODEL_ID_PATTERN = /nova(?:-\d+)?-sonic/i;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -61,6 +69,11 @@ type SonicChunkPayload = {
             contentId?: string;
             contentName?: string;
         };
+        audioOutput?: {
+            content?: string;
+            contentId?: string;
+            contentName?: string;
+        };
     };
 };
 
@@ -81,9 +94,46 @@ type SonicEventSummary = {
     }>;
 };
 
+const normalizeSonicModelId = (modelId: string) => modelId.replace(/^(?:[a-z]{2}\.)?amazon\./i, 'amazon.');
+
+const shouldFallbackToLegacySonic = (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error || '');
+    return /(resource.?not.?found|model.?not.?found|access.?denied|not authorized|unsupported|validation exception|validationexception)/i.test(message);
+};
+
+const resolveSonicModelCandidates = () => {
+    const configured = process.env.BEDROCK_NOVA_SONIC_MODEL?.trim();
+    if (configured) {
+        const normalized = normalizeSonicModelId(configured);
+        if (!SONIC_MODEL_ID_PATTERN.test(normalized)) {
+            throw new Error('BEDROCK_NOVA_SONIC_MODEL must target Amazon Nova Sonic, for example amazon.nova-2-sonic-v1:0 or amazon.nova-sonic-v1:0.');
+        }
+        return [normalized];
+    }
+
+    return [DEFAULT_SONIC_MODEL, LEGACY_SONIC_MODEL];
+};
+
+export const resolveSonicModelCandidatesForTest = resolveSonicModelCandidates;
+
 const encodeSonicEvent = (event: Record<string, unknown>) => ({
     chunk: {
         bytes: Buffer.from(JSON.stringify(event), 'utf8')
+    }
+});
+
+const buildTextContentStart = (
+    promptName: string,
+    contentName: string,
+    role: 'SYSTEM' | 'USER'
+) => ({
+    promptName,
+    contentName,
+    type: 'TEXT',
+    role,
+    interactive: false,
+    textInputConfiguration: {
+        mediaType: SONIC_TEXT_MIME
     }
 });
 
@@ -114,9 +164,9 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
         event: {
             promptStart: {
                 promptName,
-                textOutputConfiguration: { mediaType: 'text/plain' },
+                textOutputConfiguration: { mediaType: SONIC_TEXT_MIME },
                 audioOutputConfiguration: {
-                    mediaType: 'audio/lpcm',
+                    mediaType: SONIC_AUDIO_MIME,
                     sampleRateHertz: 24000,
                     sampleSizeBits: 16,
                     channelCount: 1,
@@ -130,14 +180,7 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
 
     yield encodeSonicEvent({
         event: {
-            contentStart: {
-                promptName,
-                contentName: systemInstructionContentName,
-                type: 'TEXT',
-                role: 'SYSTEM',
-                interactive: false,
-                textInputConfiguration: { mediaType: 'text/plain' }
-            }
+            contentStart: buildTextContentStart(promptName, systemInstructionContentName, 'SYSTEM')
         }
     });
 
@@ -169,7 +212,7 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
                 role: 'USER',
                 interactive: true,
                 audioInputConfiguration: {
-                    mediaType: 'audio/lpcm',
+                    mediaType: SONIC_AUDIO_MIME,
                     sampleRateHertz,
                     sampleSizeBits: 16,
                     channelCount: 1,
@@ -183,6 +226,7 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
     const bytesPerSample = 2;
     const frameSamples = Math.max(1, Math.round((sampleRateHertz * SONIC_FRAME_DURATION_MS) / 1000));
     const chunkSize = frameSamples * bytesPerSample;
+
     for (let offset = 0; offset < audioBytes.length; offset += chunkSize) {
         const frame = audioBytes.slice(offset, Math.min(audioBytes.length, offset + chunkSize));
         yield encodeSonicEvent({
@@ -197,7 +241,6 @@ async function* buildSonicInputStream(audioBytes: Uint8Array, systemPrompt: stri
         await sleep(SONIC_FRAME_DURATION_MS);
     }
 
-    // Trailing silence: give VAD time to detect end-of-speech before we close the stream
     const silenceFrames = Math.ceil(SONIC_POST_SILENCE_MS / SONIC_FRAME_DURATION_MS);
     const silenceChunk = Buffer.alloc(chunkSize).toString('base64');
     for (let i = 0; i < silenceFrames; i++) {
@@ -247,6 +290,19 @@ const parseSonicAdditionalModelFields = (raw?: string) => {
     } catch {
         return {};
     }
+};
+
+export const collectSonicInputEventsForTest = async (
+    audioBytes: Uint8Array,
+    systemPrompt: string,
+    sampleRateHertz: number
+) => {
+    const events: Array<Record<string, unknown>> = [];
+    for await (const part of buildSonicInputStream(audioBytes, systemPrompt, sampleRateHertz)) {
+        const payload = JSON.parse(Buffer.from(part.chunk.bytes).toString('utf8')) as Record<string, unknown>;
+        events.push(payload);
+    }
+    return events;
 };
 
 const summarizeSonicEvent = (streamEvent: { chunk?: { bytes?: Uint8Array } }): SonicEventSummary | null => {
@@ -301,8 +357,11 @@ const analyzePcm16Audio = (audioBytes: Uint8Array, sampleRateHertz: number) => {
     };
 };
 
-export const extractNovaSonicTranscript = (streamEvents: Array<{ chunk?: { bytes?: Uint8Array } }>) => {
+export const extractNovaSonicResponse = (streamEvents: Array<{ chunk?: { bytes?: Uint8Array } }>) => {
     const transcriptParts: string[] = [];
+    const userTranscriptParts: string[] = [];
+    const assistantTranscriptParts: string[] = [];
+    const audioChunks: Buffer[] = [];
     const contentRoles = new Map<string, SonicContentMeta>();
 
     for (const streamEvent of streamEvents) {
@@ -348,6 +407,23 @@ export const extractNovaSonicTranscript = (streamEvents: Array<{ chunk?: { bytes
             if (isFinalUserTranscript || isFinalAssistantTranscript || isFallbackTranscript) {
                 transcriptParts.push(textOutput.content);
             }
+            if (isFinalUserTranscript) {
+                userTranscriptParts.push(textOutput.content);
+            }
+            if (isFinalAssistantTranscript) {
+                assistantTranscriptParts.push(textOutput.content);
+            }
+        }
+
+        const audioOutput = event.audioOutput;
+        if (typeof audioOutput?.content === 'string') {
+            const contentKey = audioOutput.contentId || audioOutput.contentName;
+            const contentMeta = contentKey ? contentRoles.get(contentKey) : undefined;
+            
+            // Only capture the Assistant's final generated audio back
+            if (contentMeta?.role === 'ASSISTANT' && contentMeta?.type === 'AUDIO') {
+                audioChunks.push(Buffer.from(audioOutput.content, 'base64'));
+            }
         }
 
         const contentEnd = event.contentEnd;
@@ -359,35 +435,44 @@ export const extractNovaSonicTranscript = (streamEvents: Array<{ chunk?: { bytes
         }
     }
 
-    return transcriptParts.join('').replace(/\s+/g, ' ').trim();
+    return {
+        transcript: transcriptParts.join('').replace(/\s+/g, ' ').trim(),
+        userTranscript: userTranscriptParts.join('').replace(/\s+/g, ' ').trim(),
+        assistantTranscript: assistantTranscriptParts.join('').replace(/\s+/g, ' ').trim(),
+        audioBytes: audioChunks.length > 0 ? Buffer.concat(audioChunks) : null
+    };
 };
 
-export const invokeNovaSonic = async (system: string, audioBase64: string, options: SonicTranscriptOptions = {}) => {
-    const rawModelId = process.env.BEDROCK_NOVA_SONIC_MODEL || DEFAULT_SONIC_MODEL;
-    const modelId = rawModelId.replace(/^(?:[a-z]{2}\.)?amazon\./i, 'amazon.');
+const invokeNovaSonicWithModel = async (
+    modelId: string,
+    system: string,
+    audioBase64: string,
+    options: SonicTranscriptOptions = {}
+) => {
     const sonicRegion = process.env.BEDROCK_NOVA_SONIC_REGION || 'us-east-1';
-    if (!/nova-sonic/i.test(modelId)) {
-        throw new Error('BEDROCK_NOVA_SONIC_MODEL must target Amazon Nova Sonic, for example amazon.nova-sonic-v1:0.');
-    }
 
     const sampleRateHertz = options.sampleRateHertz || 16000;
-    const prompt = options.prompt || 'Transcribe the patient speech accurately. Return plain text only.';
-    const audioBytes = Buffer.from(audioBase64, 'base64');
+    let audioBytes = Buffer.from(audioBase64, 'base64');
+
+    if (audioBytes.length % 2 !== 0) {
+        const padded = Buffer.alloc(audioBytes.length + 1);
+        audioBytes.copy(padded);
+        audioBytes = padded;
+    }
 
     if (audioBytes.length === 0) {
         throw new Error('Audio payload is empty.');
     }
 
-    const combinedSystem = prompt ? `${system}\n\n${prompt}` : system;
-
     const command = new InvokeModelWithBidirectionalStreamCommand({
         modelId,
-        body: buildSonicInputStream(audioBytes, combinedSystem, sampleRateHertz),
+        body: buildSonicInputStream(audioBytes, system, sampleRateHertz),
         contentType: 'application/json',
         accept: 'application/json'
     } as any);
+
     command.middlewareStack.add(
-        (next) => async (args) => {
+        (next) => async (args: any) => {
             const request = args.request as { headers?: Record<string, string> };
             request.headers = {
                 ...(request.headers || {}),
@@ -431,26 +516,45 @@ export const invokeNovaSonic = async (system: string, audioBase64: string, optio
             }
         }
 
-        const transcript = extractNovaSonicTranscript(streamEvents);
-        if (!transcript) {
+        const result = extractNovaSonicResponse(streamEvents);
+        if (!result.transcript && !result.audioBytes) {
             const audioStats = analyzePcm16Audio(audioBytes, sampleRateHertz);
             const eventSummaries = streamEvents
                 .map((event) => summarizeSonicEvent(event))
                 .filter((summary): summary is SonicEventSummary => Boolean(summary));
-            console.error('Nova Sonic empty transcript diagnostics:', {
+            console.error('Nova Sonic empty response diagnostics:', {
                 modelId,
                 sonicRegion,
                 audio: audioStats,
                 eventNames: eventSummaries.flatMap((summary) => summary.eventNames),
                 textOutputs: eventSummaries.flatMap((summary) => summary.textOutputs)
             });
-            throw new Error('Nova Sonic returned no transcript.');
+            throw new Error('Nova Sonic returned no response.');
         }
-        return transcript;
+        return result;
     } catch (e: any) {
-        console.error('InvokeModelWithBidirectionalStream Error:', e);
-        throw new Error(`Nova Sonic transcription failed: ${e.message}`);
+        throw new Error(`Nova Sonic exchange failed: ${e.message}`);
     }
+};
+
+export const invokeNovaSonic = async (system: string, audioBase64: string, options: SonicTranscriptOptions = {}) => {
+    const candidates = resolveSonicModelCandidates();
+    let lastError: unknown;
+
+    for (let index = 0; index < candidates.length; index += 1) {
+        const modelId = candidates[index];
+        try {
+            return await invokeNovaSonicWithModel(modelId, system, audioBase64, options);
+        } catch (error) {
+            lastError = error;
+            const shouldFallback = index < candidates.length - 1 && !process.env.BEDROCK_NOVA_SONIC_MODEL && shouldFallbackToLegacySonic(error);
+            if (!shouldFallback) {
+                throw error;
+            }
+        }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error('Nova Sonic exchange failed.');
 };
 
 export const invokeNovaMultimodal = async (modelId: string, system: string, text: string, attachments: { name: string, type: string, base64: string }[]) => {
@@ -523,7 +627,6 @@ const invokeNovaConverse = async (modelId: string, system: string, messages: Mes
         }
         return "{}";
     } catch (e: any) {
-        console.error("ConverseCommand Error:", e);
         throw new Error(`Bedrock Converse API failed: ${e.message}`);
     }
 };
