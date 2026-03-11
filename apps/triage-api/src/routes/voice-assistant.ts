@@ -63,7 +63,14 @@ const voiceAssistantManagerSchema = z.object({
 
 const VOICE_ASSISTANT_FALLBACK_PROMPT = `You are Nova Triage, a strict clinical voice assistant fallback.
 
-You will receive a user transcript plus optional case context.
+You will receive:
+- the current user transcript (the latest message)
+- the full recent conversation history (recent_conversation) — read this FIRST
+- optional case context
+
+CRITICAL RULE — CONTEXT-FIRST EVALUATION:
+Before deciding the intent of the latest user message, ALWAYS read recent_conversation first.
+A short message like "20 kg" or "venti chili" is NOT out_of_scope if the previous assistant turn asked for the child's weight.
 
 Return JSON only with this exact shape:
 {
@@ -76,7 +83,8 @@ Rules:
 - Respond in the exact same language used by the user.
 - If the user asks about symptoms, urgency, triage, red flags, or what to do next: intent = "symptom_analysis".
 - If the user asks about a medication, dosage ranges, side effects, contraindications, or interactions: intent = "medication_guidance".
-- If the user asks anything else: intent = "out_of_scope".
+- If the previous turn asked for weight and the user provides it, intent = "medication_guidance".
+- If the user asks anything else with no prior context: intent = "out_of_scope".
 - Keep response_text concise for voice playback: 1 to 3 short sentences.
 - Never give a definitive diagnosis.
 - Never prescribe or issue a medical order.
@@ -88,11 +96,20 @@ Rules:
 const VOICE_ASSISTANT_MANAGER_PROMPT = `You are Nova Triage's dialogue manager.
 
 You receive:
-- the current user transcript
-- current case context
-- previous conversation state
+- the full conversation history so far (recent_conversation)
+- the current user transcript (the latest message, already appended to history)
+- the current session state (previous_state): lastIntent, pendingSlot, medicationName
+- optional case context
 
-Your job is to understand the user's intent in context, update the state, and generate the next assistant reply.
+CRITICAL RULE — CONTEXT-FIRST EVALUATION:
+Before deciding the intent of the latest user message, ALWAYS read the full recent_conversation and previous_state first.
+The latest message MUST be interpreted in light of what was previously said.
+
+Examples:
+- If a previous assistant turn asked "Quanto pesa il bambino?" or "How much does the child weigh?", then a reply like "20 kg" or "venti chili" is NOT out_of_scope — it is a medication_guidance follow-up.
+- If previous_state.pendingSlot is "medication_weight_kg", any short numeric or weight answer continues the medication flow.
+- If previous_state.pendingSlot is "symptom_details", any short follow-up continues the symptom_analysis flow.
+- Never judge a message as out_of_scope if the conversation history makes its meaning clear.
 
 Return JSON only with this exact shape:
 {
@@ -108,15 +125,15 @@ Return JSON only with this exact shape:
 }
 
 Rules:
-- Use conversation context, not just the latest utterance.
-- If the previous state is medication_guidance and pendingSlot is medication_weight_kg, then an utterance like "36 kg" or "the child weighs 36 kg" is a medication follow-up, not out of scope.
-- If the previous state is symptom_analysis and pendingSlot is symptom_details, short follow-up answers are still in triage context.
+- ALWAYS use full conversation context — never evaluate the latest utterance in isolation.
+- If previous_state.pendingSlot is "medication_weight_kg" and the user provides a weight (e.g. "20 kg", "venti chili", "pesa 18"), intent = "medication_guidance". Respond with the dosage range.
+- If previous_state.pendingSlot is "symptom_details", short answers (e.g. "da ieri", "since this morning") are still symptom_analysis.
 - Keep response_text concise for voice playback: 1 to 3 short sentences.
 - Respond in the same language as the user.
 - Never give a definitive diagnosis.
 - Never prescribe or issue a medical order.
 - For pediatric or individualized dosing, provide only general informational ranges and explicitly say they must be confirmed with a clinician or pharmacist.
-- Ask at most one clarification question when a key slot is missing.
+- Ask at most one clarification question when a key slot is still missing.
 - Do not output markdown.
 - JSON only.`;
 
@@ -251,11 +268,16 @@ const buildLocalVoiceAssistantFallback = (transcript: string, session?: VoiceSes
     };
 };
 
-const buildVoiceAssistantFallback = async (transcript: string, caseContext: string) => {
+const buildVoiceAssistantFallback = async (
+    transcript: string,
+    caseContext: string,
+    conversation: Array<{ role: 'user' | 'assistant'; text: string; intent?: string }> = []
+) => {
     const raw = await invokeNovaLite(
         VOICE_ASSISTANT_FALLBACK_PROMPT,
         JSON.stringify({
             user_transcript: transcript,
+            recent_conversation: conversation,
             case_context: caseContext
         })
     );
@@ -271,21 +293,30 @@ const buildVoiceAssistantManagerReply = async (
     caseId: string,
     conversation: Array<{ role: 'user' | 'assistant'; text: string; intent?: string }> = []
 ) => {
+    const previousState = session
+        ? {
+            lastIntent: session.lastIntent,
+            pendingSlot: session.pendingSlot,
+            medicationName: session.medicationName,
+            language: session.language
+        }
+        : null;
+
+    // Format conversation as a readable transcript string for clarity
+    const conversationText = conversation.length > 0
+        ? conversation.map(t => `${t.role.toUpperCase()}: ${t.text}`).join('\n')
+        : '(no prior turns)';
+
     const raw = await invokeNovaLite(
         VOICE_ASSISTANT_MANAGER_PROMPT,
         JSON.stringify({
-            case_id: caseId,
-            user_transcript: transcript,
-            case_context: caseContext,
+            instruction: 'Read previous_state and recent_conversation_text BEFORE evaluating the latest user message.',
+            previous_state: previousState,
+            recent_conversation_text: conversationText,
+            latest_user_message: transcript,
             recent_conversation: conversation,
-            previous_state: session
-                ? {
-                    lastIntent: session.lastIntent,
-                    pendingSlot: session.pendingSlot,
-                    medicationName: session.medicationName,
-                    language: session.language
-                }
-                : null
+            case_id: caseId,
+            case_context: caseContext
         })
     );
 
@@ -371,7 +402,7 @@ export const voiceAssistantRoutes: FastifyPluginAsync = async (server: FastifyIn
             let fallbackReply = null;
             if (!managerReply && needsFallbackReply && resolvedUserTranscript) {
                 try {
-                    fallbackReply = await buildVoiceAssistantFallback(resolvedUserTranscript, contextBuilder);
+                    fallbackReply = await buildVoiceAssistantFallback(resolvedUserTranscript, contextBuilder, conversation);
                 } catch (fallbackError) {
                     server.log.warn(fallbackError);
                     fallbackReply = buildLocalVoiceAssistantFallback(resolvedUserTranscript, existingSession);
