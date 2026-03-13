@@ -1,10 +1,21 @@
-import { describe, expect, it } from 'vitest';
-import { collectSonicInputEventsForTest, extractNovaSonicResponse, resolveSonicModelCandidatesForTest } from './bedrock';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+    collectSonicInputEventsForTest,
+    extractNovaSonicResponse,
+    invokeNovaLite,
+    isRetryableConverseTransportErrorForTest,
+    resolveSonicModelCandidatesForTest,
+    setConverseSenderForTest
+} from './bedrock';
 
 const encodeEvent = (event: Record<string, unknown>) => ({
     chunk: {
         bytes: Buffer.from(JSON.stringify({ event }), 'utf8')
     }
+});
+
+afterEach(() => {
+    setConverseSenderForTest(null);
 });
 
 describe('extractNovaSonicResponse', () => {
@@ -187,5 +198,62 @@ describe('resolveSonicModelCandidates', () => {
         } else {
             delete process.env.BEDROCK_NOVA_SONIC_MODEL;
         }
+    });
+});
+
+describe('invokeNovaConverse transport fallback', () => {
+    it('retries Converse through HTTP/1.1 after an HTTP/2 empty-response failure', async () => {
+        const calls: string[] = [];
+        setConverseSenderForTest(async (_region, transport) => {
+            calls.push(transport);
+            if (calls.length === 1) {
+                throw new Error('Unexpected error: http2 request did not get a response');
+            }
+            return '{"ok":true}';
+        });
+
+        await expect(invokeNovaLite('system', 'prompt')).resolves.toBe('{"ok":true}');
+        expect(calls).toEqual(['http2', 'http2']);
+    });
+
+    it('retries transient DNS lookup failures before succeeding', async () => {
+        const calls: string[] = [];
+        setConverseSenderForTest(async (_region, transport) => {
+            calls.push(transport);
+            if (calls.length < 3) {
+                throw new Error('The pending stream has been canceled (caused by: getaddrinfo EAI_AGAIN bedrock-runtime.eu-central-1.amazonaws.com)');
+            }
+            return '{"ok":true}';
+        });
+
+        await expect(invokeNovaLite('system', 'prompt')).resolves.toBe('{"ok":true}');
+        expect(calls).toEqual(['http2', 'http2', 'http1']);
+    });
+
+    it('does not fallback on non-transport Converse failures', async () => {
+        const calls: string[] = [];
+        setConverseSenderForTest(async (_region, transport) => {
+            calls.push(transport);
+            throw new Error('ValidationException: malformed input');
+        });
+
+        await expect(invokeNovaLite('system', 'prompt')).rejects.toThrow(
+            'Bedrock Converse API failed: ValidationException: malformed input'
+        );
+        expect(calls).toEqual(['http2']);
+    });
+
+    it('recognizes transient HTTP/2 transport failures as retryable', () => {
+        expect(
+            isRetryableConverseTransportErrorForTest(new Error('Unexpected error: http2 request did not get a response'))
+        ).toBe(true);
+        expect(
+            isRetryableConverseTransportErrorForTest(
+                new Error('The pending stream has been canceled (caused by: getaddrinfo EAI_AGAIN bedrock-runtime.eu-central-1.amazonaws.com)')
+            )
+        ).toBe(true);
+        expect(
+            isRetryableConverseTransportErrorForTest(new Error('ValidationException: malformed input'))
+        ).toBe(false);
     });
 });

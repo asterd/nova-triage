@@ -1,5 +1,5 @@
 import { BedrockRuntimeClient, ConverseCommand, InvokeModelWithBidirectionalStreamCommand, Message } from '@aws-sdk/client-bedrock-runtime';
-import { NodeHttp2Handler } from '@smithy/node-http-handler';
+import { NodeHttp2Handler, NodeHttpHandler } from '@smithy/node-http-handler';
 import { randomUUID } from 'node:crypto';
 
 if (process.env.BEDROCK_ALLOW_INSECURE_TLS === 'true') {
@@ -7,23 +7,42 @@ if (process.env.BEDROCK_ALLOW_INSECURE_TLS === 'true') {
 }
 
 const clientCache = new Map<string, BedrockRuntimeClient>();
+type BedrockTransport = 'http2' | 'http1';
+type BedrockSender = (region: string, transport: BedrockTransport, command: ConverseCommand) => Promise<string>;
 
-const getBedrockClient = (region: string) => {
-    if (!clientCache.has(region)) {
-        clientCache.set(region, new BedrockRuntimeClient({
+const getClientCacheKey = (region: string, transport: BedrockTransport) => `${region}:${transport}`;
+
+const getBedrockClient = (region: string, transport: BedrockTransport = 'http2') => {
+    const cacheKey = getClientCacheKey(region, transport);
+    if (!clientCache.has(cacheKey)) {
+        clientCache.set(cacheKey, new BedrockRuntimeClient({
             region,
-            requestHandler: new NodeHttp2Handler({
-                requestTimeout: 300000,
-                sessionTimeout: 300000,
-                disableConcurrentStreams: false,
-                maxConcurrentStreams: 20
-            })
+            requestHandler:
+                transport === 'http2'
+                    ? new NodeHttp2Handler({
+                        requestTimeout: 300000,
+                        sessionTimeout: 300000,
+                        disableConcurrentStreams: false,
+                        maxConcurrentStreams: 20
+                    })
+                    : new NodeHttpHandler({
+                        requestTimeout: 300000,
+                        connectionTimeout: 10000
+                    })
         }));
     }
-    return clientCache.get(region)!;
+    return clientCache.get(cacheKey)!;
 };
 
 const defaultRegion = process.env.AWS_REGION || 'us-east-1';
+const CONVERSE_RETRY_PLAN: Array<{ transport: BedrockTransport; delayMs: number }> = [
+    { transport: 'http2', delayMs: 0 },
+    { transport: 'http2', delayMs: 250 },
+    { transport: 'http1', delayMs: 1000 },
+    { transport: 'http1', delayMs: 2000 }
+];
+
+let converseSenderOverride: BedrockSender | null = null;
 
 export const invokeNovaLite = async (system: string, prompt: string) => {
     const modelId = process.env.BEDROCK_NOVA_LITE_MODEL || 'us.amazon.nova-lite-v1:0';
@@ -44,6 +63,38 @@ const SONIC_AUDIO_MIME = 'audio/lpcm';
 const SONIC_MODEL_ID_PATTERN = /nova(?:-\d+)?-sonic/i;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const getErrorMessage = (error: unknown) => error instanceof Error ? error.message : String(error || '');
+
+const isRetryableConverseTransportError = (error: unknown) => {
+    const message = getErrorMessage(error);
+    return /(http2 request did not get a response|pending stream has been canceled|session closed|stream.+reset|econnreset|socket hang up|timeout|timed out|service unavailable|throttl|eai_again|getaddrinfo|dns)/i.test(message);
+};
+
+const sendConverseWithTransport = async (region: string, transport: BedrockTransport, command: ConverseCommand) => {
+    const response = await getBedrockClient(region, transport).send(command);
+    if (response.output?.message?.content && response.output.message.content.length > 0) {
+        return response.output.message.content[0].text || '{}';
+    }
+    return '{}';
+};
+
+const sendConverseCommand: BedrockSender = async (region, transport, command) => {
+    if (converseSenderOverride) {
+        return converseSenderOverride(region, transport, command);
+    }
+    return sendConverseWithTransport(region, transport, command);
+};
+
+export const setConverseSenderForTest = (sender: BedrockSender | null) => {
+    converseSenderOverride = sender;
+};
+
+export const isRetryableConverseTransportErrorForTest = isRetryableConverseTransportError;
+const getConverseRetryPlan = () =>
+    converseSenderOverride
+        ? CONVERSE_RETRY_PLAN.map((attempt) => ({ ...attempt, delayMs: 0 }))
+        : CONVERSE_RETRY_PLAN;
 
 type SonicTranscriptOptions = {
     sampleRateHertz?: number;
@@ -620,13 +671,29 @@ const invokeNovaConverse = async (modelId: string, system: string, messages: Mes
         inferenceConfig: { maxTokens: 1000, topP: 0.9, temperature: 0.1 }
     });
 
-    try {
-        const response = await getBedrockClient(defaultRegion).send(command);
-        if (response.output?.message?.content && response.output.message.content.length > 0) {
-            return response.output.message.content[0].text || "{}";
+    let lastRetryableError: unknown;
+
+    const retryPlan = getConverseRetryPlan();
+
+    for (let index = 0; index < retryPlan.length; index += 1) {
+        const attempt = retryPlan[index];
+
+        if (attempt.delayMs > 0) {
+            await sleep(attempt.delayMs);
         }
-        return "{}";
-    } catch (e: any) {
-        throw new Error(`Bedrock Converse API failed: ${e.message}`);
+
+        try {
+            return await sendConverseCommand(defaultRegion, attempt.transport, command);
+        } catch (error) {
+            if (!isRetryableConverseTransportError(error)) {
+                throw new Error(`Bedrock Converse API failed: ${getErrorMessage(error)}`);
+            }
+
+            lastRetryableError = error;
+        }
     }
+
+    throw new Error(
+        `Bedrock Converse API failed after ${retryPlan.length} retry attempts: ${getErrorMessage(lastRetryableError)}`
+    );
 };

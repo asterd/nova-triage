@@ -135,11 +135,14 @@ export const caseRoutes: FastifyPluginAsync = async (server: FastifyInstance) =>
             if (parsed.success && parsed.data.case_id) {
                 updateCaseStatus(parsed.data.case_id, 'error', e.message);
             }
+            const isNetworkReachabilityError = /eai_again|getaddrinfo|dns|bedrock-runtime|enotfound|network/i.test(e.message || '');
             return reply.code(502).send({
                 status: 'error',
                 source: 'bedrock',
                 error: e.message || 'Nova analysis failed.',
-                user_message: 'Nova analysis is temporarily unavailable. You can retry or continue the demo with a different scenario.'
+                user_message: isNetworkReachabilityError
+                    ? 'Nova analysis endpoint is temporarily unreachable. Retry shortly and verify DNS/network access from the API container.'
+                    : 'Nova analysis is temporarily unavailable. You can retry or continue with a different scenario.'
             });
         }
     });

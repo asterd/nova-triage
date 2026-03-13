@@ -115,7 +115,7 @@ const caseRoutes = async (server) => {
                 status: 'error',
                 source: 'bedrock',
                 error: e.message || 'Nova analysis failed.',
-                user_message: 'Nova analysis is temporarily unavailable. You can retry or continue the demo with a different scenario.'
+                user_message: 'Nova analysis is temporarily unavailable. You can retry or continue with a different scenario.'
             });
         }
     });

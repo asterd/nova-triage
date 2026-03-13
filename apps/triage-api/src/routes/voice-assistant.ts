@@ -4,9 +4,13 @@ import { randomUUID } from 'node:crypto';
 import { invokeNovaLite, invokeNovaSonic } from '../services/nova-clients/bedrock';
 import { getCaseRecord } from '../services/case-store';
 
+const supportedVoiceLanguages = ['it', 'en', 'es', 'fr'] as const;
+type VoiceLanguage = (typeof supportedVoiceLanguages)[number];
+
 const voiceTurnSchema = z.object({
     caseId: z.string(),
     sessionId: z.string().optional(),
+    language: z.enum(supportedVoiceLanguages).optional(),
     audioBase64: z.string(),
     mimeType: z.string().optional(),
     conversation: z.array(z.object({
@@ -42,7 +46,7 @@ type VoiceSessionState = {
     lastIntent: 'symptom_analysis' | 'medication_guidance' | 'out_of_scope' | null;
     pendingSlot: 'medication_weight_kg' | 'symptom_details' | null;
     medicationName: string | null;
-    language: 'it' | 'en';
+    language: VoiceLanguage;
     updatedAt: number;
 };
 
@@ -57,7 +61,7 @@ const voiceAssistantManagerSchema = z.object({
         lastIntent: z.enum(['symptom_analysis', 'medication_guidance', 'out_of_scope']),
         pendingSlot: z.enum(['medication_weight_kg', 'symptom_details']).nullable(),
         medicationName: z.string().nullable(),
-        language: z.enum(['it', 'en'])
+        language: z.enum(supportedVoiceLanguages)
     })
 });
 
@@ -120,7 +124,7 @@ Return JSON only with this exact shape:
     "lastIntent": "symptom_analysis" | "medication_guidance" | "out_of_scope",
     "pendingSlot": "medication_weight_kg" | "symptom_details" | null,
     "medicationName": "string or null",
-    "language": "it" | "en"
+    "language": "it" | "en" | "es" | "fr"
   }
 }
 
@@ -137,7 +141,25 @@ Rules:
 - Do not output markdown.
 - JSON only.`;
 
+const languageLabelMap: Record<VoiceLanguage, string> = {
+    it: 'Italian',
+    en: 'English',
+    es: 'Spanish',
+    fr: 'French'
+};
+
 const detectItalian = (text: string) => /(?:\bciao\b|\bdose\b|\bbambin|\banni\b|\bfarmaco\b|\btachipirina\b|\bmal di\b|\bdolore\b|\bquanto\b|\bposologia\b)/i.test(text);
+
+const resolveVoiceLanguage = (
+    preferredLanguage?: VoiceLanguage | null,
+    transcript?: string,
+    session?: VoiceSessionState | null
+): VoiceLanguage => {
+    if (preferredLanguage) return preferredLanguage;
+    if (session?.language) return session.language;
+    if (detectItalian(transcript || '')) return 'it';
+    return 'en';
+};
 
 const extractMedicationName = (text: string) => {
     const normalized = text.toLowerCase();
@@ -194,7 +216,8 @@ const inferIntentFromTurn = (
 
 const buildLocalVoiceAssistantFallback = (transcript: string, session?: VoiceSessionState | null) => {
     const normalized = transcript.toLowerCase();
-    const isItalian = session?.language === 'it' || detectItalian(transcript);
+    const resolvedLanguage = resolveVoiceLanguage(session?.language, transcript, session);
+    const isItalian = resolvedLanguage === 'it';
     const extractedWeightKg = extractWeightKg(transcript);
     const sessionMedicationName = session?.medicationName;
     const followUpWeightForMedication =
@@ -271,11 +294,13 @@ const buildLocalVoiceAssistantFallback = (transcript: string, session?: VoiceSes
 const buildVoiceAssistantFallback = async (
     transcript: string,
     caseContext: string,
+    preferredLanguage: VoiceLanguage,
     conversation: Array<{ role: 'user' | 'assistant'; text: string; intent?: string }> = []
 ) => {
     const raw = await invokeNovaLite(
         VOICE_ASSISTANT_FALLBACK_PROMPT,
         JSON.stringify({
+            preferred_response_language: preferredLanguage,
             user_transcript: transcript,
             recent_conversation: conversation,
             case_context: caseContext
@@ -290,6 +315,7 @@ const buildVoiceAssistantManagerReply = async (
     transcript: string,
     caseContext: string,
     session: VoiceSessionState | null,
+    preferredLanguage: VoiceLanguage,
     caseId: string,
     conversation: Array<{ role: 'user' | 'assistant'; text: string; intent?: string }> = []
 ) => {
@@ -311,6 +337,7 @@ const buildVoiceAssistantManagerReply = async (
         VOICE_ASSISTANT_MANAGER_PROMPT,
         JSON.stringify({
             instruction: 'Read previous_state and recent_conversation_text BEFORE evaluating the latest user message.',
+            preferred_response_language: preferredLanguage,
             previous_state: previousState,
             recent_conversation_text: conversationText,
             latest_user_message: transcript,
@@ -331,7 +358,7 @@ export const voiceAssistantRoutes: FastifyPluginAsync = async (server: FastifyIn
                 return reply.code(400).send({ status: 'error', error: 'Invalid voice turn payload.' });
             }
 
-            const { caseId, audioBase64, sessionId: providedSessionId, conversation = [] } = parsed.data;
+            const { caseId, audioBase64, sessionId: providedSessionId, conversation = [], language: preferredLanguage } = parsed.data;
             const resolvedSessionId = providedSessionId || voiceSessionIdsByCaseId.get(caseId) || randomUUID();
             const sessionId = resolvedSessionId;
             let existingSession = voiceSessions.get(sessionId) || null;
@@ -351,12 +378,15 @@ export const voiceAssistantRoutes: FastifyPluginAsync = async (server: FastifyIn
                         ? 'symptom_details'
                         : null,
                     medicationName: extractMedicationName(lastUserTurn?.text || '') || null,
-                    language: detectItalian(lastUserTurn?.text || lastAssistantTurn?.text || '') ? 'it' : 'en',
+                    language: resolveVoiceLanguage(preferredLanguage, lastUserTurn?.text || lastAssistantTurn?.text || '', null),
                     updatedAt: Date.now()
                 };
             }
+
+            const responseLanguage = resolveVoiceLanguage(preferredLanguage, conversation.at(-1)?.text || '', existingSession);
             
             let contextBuilder = SYSTEM_PROMPT;
+            contextBuilder += `\n\nPreferred response language: ${languageLabelMap[responseLanguage]}. Always answer in ${languageLabelMap[responseLanguage]} even if detection from the transcript is ambiguous.`;
             if (existingSession) {
                 contextBuilder += `\n\nConversation Memory:\nLast intent: ${existingSession.lastIntent || 'unknown'}\nPending slot: ${existingSession.pendingSlot || 'none'}\nMedication in discussion: ${existingSession.medicationName || 'unknown'}`;
             }
@@ -391,6 +421,7 @@ export const voiceAssistantRoutes: FastifyPluginAsync = async (server: FastifyIn
                         resolvedUserTranscript,
                         contextBuilder,
                         existingSession,
+                        responseLanguage,
                         caseId,
                         conversation
                     );
@@ -402,10 +433,13 @@ export const voiceAssistantRoutes: FastifyPluginAsync = async (server: FastifyIn
             let fallbackReply = null;
             if (!managerReply && needsFallbackReply && resolvedUserTranscript) {
                 try {
-                    fallbackReply = await buildVoiceAssistantFallback(resolvedUserTranscript, contextBuilder, conversation);
+                    fallbackReply = await buildVoiceAssistantFallback(resolvedUserTranscript, contextBuilder, responseLanguage, conversation);
                 } catch (fallbackError) {
                     server.log.warn(fallbackError);
-                    fallbackReply = buildLocalVoiceAssistantFallback(resolvedUserTranscript, existingSession);
+                    fallbackReply = buildLocalVoiceAssistantFallback(resolvedUserTranscript, {
+                        ...existingSession,
+                        language: responseLanguage
+                    } as VoiceSessionState);
                 }
             }
 
@@ -427,7 +461,7 @@ export const voiceAssistantRoutes: FastifyPluginAsync = async (server: FastifyIn
                     lastIntent: resolvedIntent,
                     pendingSlot: null,
                     medicationName: extractMedicationName(resolvedUserTranscript) || existingSession?.medicationName || null,
-                    language: detectItalian(resolvedUserTranscript) ? 'it' : 'en',
+                    language: responseLanguage,
                     updatedAt: Date.now()
                 };
 

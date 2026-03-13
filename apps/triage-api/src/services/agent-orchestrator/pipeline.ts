@@ -14,10 +14,88 @@ import { AIResult } from 'shared-types';
 import { evaluateSafetyRules, getHigherUrgency } from './safety';
 
 const cleanJSON = (str: string) => {
-    return str.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    return str.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
 };
 
-const parseJSON = <T>(value: string): T => JSON.parse(cleanJSON(value)) as T;
+const extractBalancedJson = (value: string) => {
+    const trimmed = cleanJSON(value);
+    const objectStart = trimmed.indexOf('{');
+    const arrayStart = trimmed.indexOf('[');
+    const start =
+        objectStart === -1 ? arrayStart : arrayStart === -1 ? objectStart : Math.min(objectStart, arrayStart);
+
+    if (start === -1) {
+        return trimmed;
+    }
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let expectedClosing = trimmed[start] === '{' ? '}' : ']';
+
+    for (let index = start; index < trimmed.length; index += 1) {
+        const char = trimmed[index];
+
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (char === '\\') {
+                escaped = true;
+            } else if (char === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+
+        if (char === '{' || char === '[') {
+            depth += 1;
+            continue;
+        }
+
+        if (char === '}' || char === ']') {
+            depth -= 1;
+            if (depth === 0 && char === expectedClosing) {
+                return trimmed.slice(start, index + 1);
+            }
+        }
+    }
+
+    return trimmed.slice(start);
+};
+
+const repairCommonJsonIssues = (value: string) =>
+    value
+        .replace(/,\s*([}\]])/g, '$1')
+        .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)/g, '$1"$2"$3')
+        .replace(/:\s*'([^'\\]*(?:\\.[^'\\]*)*)'/g, ': "$1"')
+        .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:\s*)([^,\]}\n"][^,\]}]*)(?=\s*[,}\]])/g, (_match, prefix, key, sep, rawValue) => {
+            const candidate = String(rawValue).trim();
+            if (!candidate) return `${prefix}"${key}"${sep}""`;
+            if (/^(true|false|null|-?\d+(?:\.\d+)?)$/i.test(candidate)) return `${prefix}"${key}"${sep}${candidate}`;
+            return `${prefix}"${key}"${sep}"${candidate.replace(/"/g, '\\"')}"`;
+        });
+
+const parseJSON = <T>(value: string): T => {
+    const normalized = extractBalancedJson(value);
+
+    try {
+        return JSON.parse(normalized) as T;
+    } catch (initialError) {
+        const repaired = repairCommonJsonIssues(normalized);
+        try {
+            return JSON.parse(repaired) as T;
+        } catch (repairError) {
+            const snippet = repaired.slice(0, 600);
+            const reason = repairError instanceof Error ? repairError.message : String(repairError || '');
+            throw new SyntaxError(`Unable to parse model JSON: ${reason}. Payload snippet: ${snippet}`);
+        }
+    }
+};
 
 const inferSeverity = (value: string): 'high' | 'moderate' | 'low' => {
     const normalized = value.toLowerCase();
